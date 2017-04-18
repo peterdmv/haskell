@@ -15,13 +15,14 @@
 --   - saImmOmAccessorGet() (partially)
 --     Supported value types:
 --       SA_IMM_ATTR_SAINT32T
---       SA_IMM_ATTR_SANAMET
+--       SA_IMM_ATTR_SAUINT32T
 --       SA_IMM_ATTR_SASTRINGT
 
 
 module Main where
 
 import Control.Monad(when)
+import qualified Data.ByteString.Char8 as B
 import Data.Char
 import Foreign
 import Foreign.C.String
@@ -35,6 +36,25 @@ import System.IO.Unsafe (unsafePerformIO)
 
 #include <saAis.h>
 #include <saImm.h>
+
+-- Native Haskell result types
+--
+data Value = AVInt32 { getInt32 :: Int32 }
+           | AVUint32 { getUint32 :: Word32 }
+           | AVInt64  { getInt64 :: Int64 }
+           | AVUint64  { getUint64 :: Word64 }
+           | AVTime { getTime :: Int64}
+           | AVName { getName :: String}
+           | AVFloat { getFloat :: Float}
+           | AVDouble { getDouble :: Double}
+           | AVString { getString :: String}
+           | AVAny { getAny :: B.ByteString} -- TODO: implement
+  deriving (Show)
+
+data Attribute = Attribute
+    { attrName :: String
+    , attrValues :: [Value] }
+  deriving (Show)
 
 -- saAis.h
 -- Types used by the NTF/IMMS service
@@ -61,8 +81,7 @@ data SaVersionT = SaVersionT { releaseCode :: CChar
 -- saImm.h
 -- 4.2.2 Various IMM Service Names
 --
-newtype SaImmAttrNameT = SaImmAttrNameT  { getSaImmAttrNameT :: CString }
-  deriving (Show, Storable)
+type SaImmAttrNameT = CString
 
 -- 4.2.3 SaImmValueTypeT
 --
@@ -70,7 +89,7 @@ newtype SaImmValueTypeT = SaImmValueTypeT { getSaImmValueTypeT :: CInt }
   deriving (Show, Eq, Storable)
 #{enum SaImmValueTypeT, SaImmValueTypeT
   , saImmAttrSaInt32    = SA_IMM_ATTR_SAINT32T
-  , saImmAtrrSaUint32   = SA_IMM_ATTR_SAUINT32T
+  , saImmAttrSaUint32   = SA_IMM_ATTR_SAUINT32T
   , saImmAttrSaInt64    = SA_IMM_ATTR_SAINT64T
   , saImmAttrSaUint64   = SA_IMM_ATTR_SAUINT64T
   , saImmAttrSaTime     = SA_IMM_ATTR_SATIMET
@@ -78,22 +97,12 @@ newtype SaImmValueTypeT = SaImmValueTypeT { getSaImmValueTypeT :: CInt }
   , saImmAttrSaFloat    = SA_IMM_ATTR_SAFLOATT
   , saImmAttrSaDouble   = SA_IMM_ATTR_SADOUBLET
   , saImmAttrSaString   = SA_IMM_ATTR_SASTRINGT
-  , saImmAtrrSaAny      = SA_IMM_ATTR_SAANYT
+  , saImmAttrSaAny      = SA_IMM_ATTR_SAANYT
   }
 
 -- 4.2.6 SaImmAttrValueT
 --
-data SaImmAttrValueT = SaImmAttrSaInt32 { getSaInt32 :: CInt }
-                     | SaImmAttrSaUint32 { getSaUint32 :: CUInt }
-                     | SaImmAttrSaInt64  { getSaInt64 ::CLong }
-                     | SaImmAttrSaUint64  { getSaUint64 ::CULong}
-                     | SaImmAttrSaTime { getSaTime :: CLong}
-                     | SaImmAttrSaName { getSaName :: SaNameT}
-                     | SaImmAttrSaFloat { getSaFloat :: CFloat}
-                     | SaImmAttrSaDouble { getSaDouble :: CDouble}
-                     | SaImmAttrSaString { getSaString :: CString}
-                     | SaImmAttrSaAny { getSaAny :: SaNameT} -- TODO: implement
-  deriving (Show)
+type SaImmAttrValueT = Ptr ()
 
 -- 4.2.8 SaImmAttrValuesT_2
 --
@@ -101,7 +110,7 @@ data SaImmAttrValuesT_2 = SaImmAttrValuesT_2
     { saImmAttrValuesAttrName :: SaImmAttrNameT
     , saImmAttrValuesAttrValueType :: SaImmValueTypeT
     , saImmAttrValuesAttrValuesNumber :: CUInt
-    , saImmAttrValuesAttrValues :: [SaImmAttrValueT] }
+    , saImmAttrValuesAttrValues :: Ptr SaImmAttrValueT }
   deriving (Show)
 
 
@@ -126,7 +135,7 @@ saImmOmInitialize :: IO (Either SaAisErrorT SaImmHandleT)
 saImmOmInitialize = do
   let version = SaVersionT (CChar . fromIntegral $ ord 'A') 2 15
   alloca $ \handlePtr -> do
-  alloca $ \versionPtr -> do
+   alloca $ \versionPtr -> do
     poke versionPtr version
     res <- c_saImmOmInitialize handlePtr nullPtr versionPtr
     let val = getSaAisErrorT res
@@ -167,10 +176,10 @@ foreign import ccall "saImmOm.h saImmOmAccessorGet_2"
 
 saImmOmAccessorGet :: SaImmAccessorHandleT
                    -> String
-                   -> IO (Either SaAisErrorT  [SaImmAttrValuesT_2])
+                   -> IO (Either SaAisErrorT  (Ptr (Ptr SaImmAttrValuesT_2)))
 saImmOmAccessorGet handle object = do
   alloca $ \saname -> do
-  alloca $ \attributes -> do
+   alloca $ \attributes -> do
     let newobj = SaNameT (fromIntegral (length object)) (fmap castCharToCUChar object)
     poke saname newobj
     st <- peek saname
@@ -179,9 +188,7 @@ saImmOmAccessorGet handle object = do
     if res == saAisOk
       then do
         attrs <- peek attributes
-        attrList <- peekArray0 nullPtr attrs
-        let result = map (unsafePerformIO . peek) attrList
-        return $ Right result
+        return $ Right attrs
       else do
         return $ Left res
 
@@ -214,27 +221,6 @@ instance Storable SaVersionT where
     #{poke SaVersionT, minorVersion} ptr minorVersion
 
 
-peekArraySaInt32 :: Int -> Ptr CInt -> IO [CInt]
-peekArraySaInt32 size ptr | size <= 0 = return []
-                     | otherwise = f (size-1) []
-  where
-    f 0 acc = do e <- peekElemOff ptr 0; return (e:acc)
-    f n acc = do e <- peekElemOff ptr n; f (n-1) (e:acc)
-
-peekArraySaNameT :: Int -> Ptr SaNameT -> IO [SaNameT]
-peekArraySaNameT size ptr | size <= 0 = return []
-                     | otherwise = f (size-1) []
-  where
-    f 0 acc = do e <- peekElemOff ptr 0; return (e:acc)
-    f n acc = do e <- peekElemOff ptr n; f (n-1) (e:acc)
-
-peekArraySaString :: Int -> Ptr CString -> IO [CString]
-peekArraySaString size ptr | size <= 0 = return []
-                     | otherwise = f (size-1) []
-  where
-    f 0 acc = do e <- peekElemOff ptr 0; return (e:acc)
-    f n acc = do e <- peekElemOff ptr n; f (n-1) (e:acc)
-
 instance Storable SaImmAttrValuesT_2 where
   alignment _ = #{alignment SaImmAttrValuesT_2}
   sizeOf _ = #{size SaImmAttrValuesT_2}
@@ -242,26 +228,11 @@ instance Storable SaImmAttrValuesT_2 where
     saImmAttrValuesAttrName         <- #{peek SaImmAttrValuesT_2, attrName} ptr
     saImmAttrValuesAttrValueType    <- #{peek SaImmAttrValuesT_2, attrValueType} ptr
     saImmAttrValuesAttrValuesNumber <- #{peek SaImmAttrValuesT_2, attrValuesNumber} ptr
-
-    case saImmAttrValuesAttrValueType of
-      attrType | attrType == saImmAttrSaInt32 -> do
-        saImmAttrValuesAttrValues <- (map SaImmAttrSaInt32) <$> (peekArraySaInt32 (fromIntegral saImmAttrValuesAttrValuesNumber) (plusPtr ptr 16) )
-        return (SaImmAttrValuesT_2 saImmAttrValuesAttrName
-                                   saImmAttrValuesAttrValueType
-                                   saImmAttrValuesAttrValuesNumber
-                                   saImmAttrValuesAttrValues)
-               | attrType == saImmAttrSaName -> do
-        saImmAttrValuesAttrValues <- (map SaImmAttrSaName) <$> (peekArraySaNameT (fromIntegral saImmAttrValuesAttrValuesNumber) (plusPtr ptr 16) )
-        return (SaImmAttrValuesT_2 saImmAttrValuesAttrName
-                                   saImmAttrValuesAttrValueType
-                                   saImmAttrValuesAttrValuesNumber
-                                   saImmAttrValuesAttrValues)
-               | attrType == saImmAttrSaString -> do
-        saImmAttrValuesAttrValues <- (map SaImmAttrSaString) <$> (peekArraySaString (fromIntegral saImmAttrValuesAttrValuesNumber) (plusPtr ptr 16) )
-        return (SaImmAttrValuesT_2 saImmAttrValuesAttrName
-                                   saImmAttrValuesAttrValueType
-                                   saImmAttrValuesAttrValuesNumber
-                                   saImmAttrValuesAttrValues)
+    saImmAttrValuesAttrValues       <- #{peek SaImmAttrValuesT_2, attrValues} ptr
+    return (SaImmAttrValuesT_2 saImmAttrValuesAttrName
+                               saImmAttrValuesAttrValueType
+                               saImmAttrValuesAttrValuesNumber
+                               saImmAttrValuesAttrValues)
   poke ptr (SaImmAttrValuesT_2 saImmAttrValuesAttrName
                                saImmAttrValuesAttrValueType
                                saImmAttrValuesAttrValuesNumber
@@ -269,18 +240,56 @@ instance Storable SaImmAttrValuesT_2 where
     #{poke SaImmAttrValuesT_2, attrName} ptr saImmAttrValuesAttrName
     #{poke SaImmAttrValuesT_2, attrValueType} ptr saImmAttrValuesAttrValueType
     #{poke SaImmAttrValuesT_2, attrValuesNumber} ptr saImmAttrValuesAttrValuesNumber
-
-    case saImmAttrValuesAttrValues of
-      [SaImmAttrSaInt32 val] -> do
-        pokeArray (plusPtr ptr 16) $  map getSaInt32 saImmAttrValuesAttrValues
-      [SaImmAttrSaName val] -> do
-        pokeArray (plusPtr ptr 16) $  map getSaName saImmAttrValuesAttrValues
-      [SaImmAttrSaString val] -> do
-        pokeArray (plusPtr ptr 16) $  map getSaString saImmAttrValuesAttrValues
+    #{poke SaImmAttrValuesT_2, attrValues} ptr saImmAttrValuesAttrValues
 
 --
 -- Helper functions
 --
+
+convertAttrValues :: Ptr (Ptr SaImmAttrValuesT_2) -> [Attribute]
+convertAttrValues ptr | ptr == nullPtr = []
+convertAttrValues ptr = unsafePerformIO $ do
+  attribs <- peekArray0 nullPtr ptr
+  let attribs' = map (unsafePerformIO . peek) attribs
+  return $ convertAttrValues' attribs'
+
+convertAttrValues' :: [SaImmAttrValuesT_2] -> [Attribute]
+convertAttrValues' [] = []
+convertAttrValues' (x:xs) =
+  let avType = saImmAttrValuesAttrValueType x
+      size = saImmAttrValuesAttrValuesNumber x
+      values = saImmAttrValuesAttrValues x
+  in Attribute { attrName = fetchString . saImmAttrValuesAttrName $ x
+             , attrValues = convertValues avType size values } : convertAttrValues' xs
+
+
+convertValues :: SaImmValueTypeT -> CUInt -> Ptr SaImmAttrValueT -> [Value]
+convertValues avType size ptr
+   | ptr == nullPtr || size == 0 = []
+convertValues avType size ptr = unsafePerformIO $ do
+  values <- peekArray (fromIntegral size) ptr
+  return $ convertValues' avType values
+
+convertValues' :: SaImmValueTypeT -> [SaImmAttrValueT] -> [Value]
+convertValues' avType [] = []
+convertValues' avType (x:xs) =
+  case avType of
+    _ | avType == saImmAttrSaInt32 -> (unsafePerformIO $ do
+      value <- peek ((castPtr x) :: Ptr CInt)
+      return (AVInt32 $ fromIntegral value)) : convertValues' avType xs
+      | avType == saImmAttrSaUint32 -> (unsafePerformIO $ do
+      value <- peek ((castPtr x) :: Ptr CUInt)
+      return (AVUint32 $ fromIntegral value)) : convertValues' avType xs
+      | avType == saImmAttrSaString -> (unsafePerformIO $ do
+      ptr <- peek ((castPtr x) :: Ptr CString)
+      value <- peekCString ptr
+      return (AVString $ value)) : convertValues' avType xs
+    _ -> []
+
+
+fetchString :: CString -> String
+fetchString cstr = unsafePerformIO $ peekCString cstr
+
 
 initializeImm :: IO (Either String (SaImmHandleT, SaImmAccessorHandleT))
 initializeImm = do
@@ -296,6 +305,16 @@ initializeImm = do
     Left err -> do
       return $ Left "IMM error: failed to initialize handle"
 
+
+getMO :: SaImmAccessorHandleT -> String -> [Attribute]
+getMO handle dn = unsafePerformIO $ do
+  retval <- saImmOmAccessorGet handle dn
+  case retval of
+    Right attribs -> do
+      return $ convertAttrValues attribs
+    Left err -> do return []
+
+
 main = do
   args <- getArgs
   when (length args /= 1) $ do
@@ -305,9 +324,5 @@ main = do
   case res of
     Right (_, accessorHandle)  -> do
       print "IMM OK"
-      retval <- saImmOmAccessorGet accessorHandle (head args)
-      case retval of
-        Right attribs -> do
-          print attribs
-        Left err -> print err
+      print $ getMO accessorHandle (head args)
     Left x -> print x
